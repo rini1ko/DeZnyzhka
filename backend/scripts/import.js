@@ -122,7 +122,9 @@ async function collect(s) {
     await sleep(1000);
     try {
       items.push(...(await fromPage(await getHtml(link), link)));
-    } catch {}
+    } catch (e) {
+      console.log(`   ↳ підсторінка ${link}: ${e.message}`);
+    }
   }
   return items;
 }
