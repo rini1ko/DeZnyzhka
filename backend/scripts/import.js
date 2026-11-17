@@ -1,10 +1,10 @@
-// Автопошук та автомодерація знижок через Gemini.
-// Запуск: cd backend && npm run import (щодня: .github/workflows/daily-import.yml)
+// Автопошук та автомодерація знижок (текст + афіші/банери) через Groq та Gemini.
+// Запуск: cd backend && npm run import
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import { DEAL_RE, parsePosts, guessEndDate, addDays } from './telegram-parse.js';
-import { extractWebLines, htmlToText, promoLinks } from './web-parse.js';
+import { extractWebLines, htmlToText, promoLinks, promoImages } from './web-parse.js';
 import { extractDealsLLM } from './llm-extract.js';
 import { scoreDeal, hasProfanity } from '../src/moderation.js';
 
@@ -13,12 +13,18 @@ const manual = JSON.parse(readFileSync(new URL('../../infra/sources.json', impor
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const today = new Date().toISOString().slice(0, 10);
 const MAX_AGE_DAYS = 14;
-const HEADERS = { 'User-Agent': 'DeZnyzhkaBot/0.1 (student project)' };
-const KEY = process.env.GEMINI_API_KEY;
-// Безкоштовний тариф AI Studio дає ~20 RPD на модель, ставимо запас під 2-3 моделі
-const LLM_MAX = +(process.env.LLM_MAX_CALLS || 45);
-let llmCalls = 0, llmOff = !KEY, failed = 0;
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8',
+};
+
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
+const GROQ_KEY = process.env.GROQ_API_KEY;
+const LLM_MAX = +(process.env.LLM_MAX_CALLS || (GROQ_KEY ? 400 : 40));
+let llmCalls = 0, llmOff = !GEMINI_KEY && !GROQ_KEY, failed = 0;
 const hash = t => createHash('md5').update(t).digest('hex').slice(0, 10);
+
+const SKIP_DOMAINS = /(facebook\.com|vk\.com|instagram\.com|business\.site)/i;
 
 const { data: withSite } = await db
   .from('places')
@@ -27,7 +33,7 @@ const { data: withSite } = await db
 
 const seen = new Set(manual.map(m => m.url).filter(Boolean));
 const auto = (withSite || [])
-  .filter(p => !seen.has(p.website))
+  .filter(p => !seen.has(p.website) && !SKIP_DOMAINS.test(p.website))
   .map(p => ({ url: p.website, place: p.name, place_id: p.id }));
 const sources = [...manual, ...auto];
 
@@ -39,25 +45,30 @@ async function getHtml(url) {
 
 async function fromPage(html, page) {
   const text = htmlToText(html);
-  // Викликаємо Gemini ТІЛЬКИ якщо на сторінці є хоча б згадка про знижки/акції/% — це економить денний ліміт запитів
-  const hasPromoHints = text.length >= 200 && DEAL_RE.test(text);
+  const images = promoImages(html, page);
+  const hasPromoHints = (text.length >= 150 && DEAL_RE.test(text)) || images.length > 0;
 
   if (!llmOff && llmCalls < LLM_MAX && hasPromoHints) {
     try {
       llmCalls++;
-      await sleep(13000); // ~4-5 запитів/хв, щоб не впиратися в ліміт 5 RPM
-      const deals = await extractDealsLLM(text, { apiKey: KEY, today });
+      await sleep(GROQ_KEY ? 2200 : 12000); // Groq дозволяє до 30 RPM, Gemini — до 5 RPM
+      const deals = await extractDealsLLM(text, {
+        geminiKey: GEMINI_KEY,
+        groqKey: GROQ_KEY,
+        today,
+        images,
+      });
       return deals.map(d => ({
         source: 'web',
         url: `${page}#${hash(d.title + (d.ends_on || ''))}`,
         deal: d,
       }));
     } catch (e) {
-      if (e.message === 'RATE_LIMIT') {
+      if (e.message.includes('RATE_LIMIT')) {
         llmOff = true;
-        console.log('… денний ліміт Gemini вичерпано, далі прості правила');
+        console.log('… ліміт ШІ вичерпано, далі прості правила');
       } else {
-        console.log(`… Gemini: ${e.message}; для цієї сторінки прості правила`);
+        console.log(`… ШІ: ${e.message}; для цієї сторінки прості правила`);
       }
     }
   }
@@ -72,25 +83,34 @@ async function fromPage(html, page) {
 async function collect(s) {
   if (s.channel) {
     const posts = parsePosts(await getHtml(`https://t.me/s/${s.channel}`))
-      .filter(p => DEAL_RE.test(p.text))
-      .filter(p => !p.date || (Date.now() - Date.parse(p.date)) / 864e5 <= MAX_AGE_DAYS);
+      .filter(p => !p.date || (Date.now() - Date.parse(p.date)) / 864e5 <= MAX_AGE_DAYS)
+      // Беремо пости або з ключовими словами, або з картинками-афішами
+      .filter(p => DEAL_RE.test(p.text) || p.images.length > 0)
+      .slice(0, 15);
 
     const items = [];
     for (const p of posts) {
       if (!llmOff && llmCalls < LLM_MAX) {
         try {
           llmCalls++;
-          await sleep(13000);
-          const deals = await extractDealsLLM(p.text, { apiKey: KEY, today });
+          await sleep(GROQ_KEY ? 2200 : 12000);
+          const deals = await extractDealsLLM(p.text, {
+            geminiKey: GEMINI_KEY,
+            groqKey: GROQ_KEY,
+            today,
+            images: p.images,
+          });
           for (const d of deals) {
             items.push({ source: 'telegram', url: p.url, deal: d });
           }
           continue;
         } catch (e) {
-          if (e.message === 'RATE_LIMIT') llmOff = true;
+          if (e.message.includes('RATE_LIMIT')) llmOff = true;
         }
       }
-      items.push({ source: 'telegram', url: p.url, text: p.text });
+      if (p.text && DEAL_RE.test(p.text)) {
+        items.push({ source: 'telegram', url: p.url, text: p.text });
+      }
     }
     return items;
   }
@@ -108,7 +128,6 @@ async function collect(s) {
 }
 
 function toRow(it, placeId) {
-  // 1. Якщо пропозицію витягнув і перевірив Gemini — публікуємо автоматично без ручної модерації
   if (it.deal) {
     const fullText = `${it.deal.title} ${it.deal.description || ''} ${it.deal.conditions || ''}`;
     if (hasProfanity(fullText)) return null;
@@ -127,14 +146,13 @@ function toRow(it, placeId) {
       ends_on,
       source: it.source,
       source_url: it.url,
-      approved: true, // схвалено Gemini автоматично
+      approved: true,
       mod_score: 95,
-      mod_note: 'Автомодерація Gemini: ОК',
+      mod_note: 'Автомодерація ШІ: ОК',
       guessed,
     };
   }
 
-  // 2. Фолбек на прості правила (якщо закінчився ліміт Gemini)
   const end = guessEndDate(it.text, today);
   const [first, ...rest] = it.text.split('\n').filter(Boolean);
   const r = {
@@ -178,7 +196,7 @@ function toRow(it, placeId) {
 for (const s of sources) {
   const label = s.channel || s.url;
   try {
-    await sleep(1000);
+    await sleep(800);
     const pl = s.place_id
       ? { id: s.place_id }
       : (await db.from('places').select('id').eq('name', s.place).maybeSingle()).data;
@@ -194,18 +212,12 @@ for (const s of sources) {
       continue;
     }
 
-    // Прибираємо дублі за source_url в межах одного запиту
     const uniqueMap = new Map();
-    for (const item of parsed) {
-      uniqueMap.set(item.source_url, item);
-    }
+    for (const item of parsed) uniqueMap.set(item.source_url, item);
     const deduped = [...uniqueMap.values()];
     const rows = deduped.map(({ guessed, ...row }) => row);
 
-    // Оновлюємо дані при збігу source_url, щоб актуальні акції не ігнорувалися
-    const { error } = await db
-      .from('deals')
-      .upsert(rows, { onConflict: 'source_url' });
+    const { error } = await db.from('deals').upsert(rows, { onConflict: 'source_url' });
 
     const again = deduped.filter(r => r.guessed).map(r => r.source_url);
     if (!error && again.length) {
@@ -228,4 +240,4 @@ for (const s of sources) {
   }
 }
 
-console.log(`\nГотово. Не вдалося відкрити джерел: ${failed} із ${sources.length}. Запитів до Gemini: ${llmCalls}`);
+console.log(`\nГотово. Не вдалося відкрити джерел: ${failed} із ${sources.length}. Запитів до ШІ: ${llmCalls}`);
