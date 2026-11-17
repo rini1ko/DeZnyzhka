@@ -139,12 +139,30 @@ async function resolveGroqModels(apiKey) {
   return cachedModels;
 }
 
+// Ліміти Groq діють окремо для кожної моделі (запити/токени за хвилину, запити/токени за добу)
+const exhausted = new Set(); // моделі з вичерпаним денним лімітом, до кінця запуску
+let nextFreeAt = 0;          // коли можна слати наступний запит (за заголовками Groq)
+
+const parseDuration = s =>   // "7.66s", "2m59.56s", "120ms" -> мс
+  [...String(s || '').matchAll(/([\d.]+)(ms|h|m|s)/g)]
+    .reduce((sum, [, n, u]) => sum + +n * { ms: 1, s: 1000, m: 60000, h: 3600000 }[u], 0);
+
+function paceFrom(res, model) {
+  const h = name => res.headers.get(name);
+  if (h('x-ratelimit-remaining-tokens') !== null && +h('x-ratelimit-remaining-tokens') < 3000) {
+    nextFreeAt = Math.max(nextFreeAt, Date.now() + parseDuration(h('x-ratelimit-reset-tokens')) + 500);
+  }
+  if (h('x-ratelimit-remaining-requests') !== null && +h('x-ratelimit-remaining-requests') < 2) exhausted.add(model);
+}
+
 async function callGroq(text, images, { apiKey, today }) {
   const { text: textModels, vision: visionModels } = await resolveGroqModels(apiKey);
   const hasImages = Array.isArray(images) && images.length > 0 && visionModels.length > 0;
   const candidates = hasImages ? visionModels : textModels;
 
   if (!candidates.length) throw new Error('У твоєму акаунті Groq не знайдено доступних чат-моделей');
+  const live = candidates.filter(m => !exhausted.has(m));
+  if (!live.length) throw new Error('GROQ_RATE_LIMIT'); // усі моделі вичерпали денний ліміт
 
   const userContent = hasImages
     ? [
@@ -154,9 +172,12 @@ async function callGroq(text, images, { apiKey, today }) {
     : buildPrompt(text, today, false);
 
   let lastErr;
-  for (const model of candidates) {
+  for (const model of live) {
     const isReasoning = /gpt-oss|qwen3/i.test(model);
     for (let attempt = 1; attempt <= 2; attempt++) {
+      const wait = nextFreeAt - Date.now();
+      if (wait > 0) await sleep(wait); // чекаємо, поки звільниться ліміт токенів
+
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -176,12 +197,23 @@ async function callGroq(text, images, { apiKey, today }) {
         signal: AbortSignal.timeout(45000),
       });
 
+      paceFrom(res, model);
+
       if (res.status === 429) {
-        if (attempt === 1) {
-          await sleep(16000);
+        const body = await res.text().catch(() => '');
+        const retryMs = (+res.headers.get('retry-after') || 0) * 1000;
+        lastErr = new Error('GROQ_RATE_LIMIT');
+        if (/per day|TPD|RPD/i.test(body) || retryMs > 120000) { // добовий ліміт цієї моделі
+          exhausted.add(model);
+          console.log(`… Groq ${model}: денний ліміт вичерпано, беру іншу модель`);
+          break;
+        }
+        if (attempt === 1) { // хвилинний ліміт: чекаємо стільки, скільки каже Groq
+          const waitMs = Math.min(retryMs || 16000, 90000) + 500;
+          console.log(`… Groq ${model}: ліміт за хвилину, чекаю ${Math.round(waitMs / 1000)} с`);
+          nextFreeAt = Date.now() + waitMs;
           continue;
         }
-        lastErr = new Error('GROQ_RATE_LIMIT');
         break;
       }
 
