@@ -31,13 +31,17 @@ const { data: withSite } = await db
   .not('website', 'is', null);
 
 const seen = new Set(manual.map(m => m.url).filter(Boolean));
-const auto = (withSite || [])
-  .filter(p => !seen.has(p.website) && !SKIP_DOMAINS.test(p.website))
-  .map(p => ({ url: p.website, place: p.name, place_id: p.id }));
+const auto = [];
+for (const p of withSite || []) {
+  const cleanUrl = p.website.trim().replace(/\/+$/, '');
+  if (seen.has(cleanUrl) || SKIP_DOMAINS.test(cleanUrl)) continue;
+  seen.add(cleanUrl);
+  auto.push({ url: p.website, place: p.name, place_id: p.id });
+}
 const sources = [...manual, ...auto];
 
 async function getHtml(url) {
-  const r = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(15000) });
+  const r = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(8000) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.text();
 }

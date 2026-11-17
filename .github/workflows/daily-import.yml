@@ -16,6 +16,7 @@ jobs:
       run:
         working-directory: backend
     env:
+      NODE_TLS_REJECT_UNAUTHORIZED: '0'
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
