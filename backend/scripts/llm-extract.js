@@ -126,16 +126,16 @@ async function resolveGroqModels(apiKey) {
   const json = await res.json();
   const ids = (json.data || [])
     .map(m => m.id)
-    .filter(id => !/whisper|tts|guard|embed|safeguard/i.test(id));
+    .filter(id => !/whisper|tts|orpheus|guard|embed|safeguard/i.test(id));
 
   const vision = ids.filter(id => /vision|llama-4|scout|maverick|vl/i.test(id));
-  // Спершу ставимо моделі без довгого <think> (llama, gemma, mistral, gpt-oss-20b), а важкі reasoning (qwen3, 120b) — в резерв
   const nonVision = ids.filter(id => !vision.includes(id));
-  const fast = nonVision.filter(id => /llama|gemma|mistral|20b/i.test(id) && !/qwen3/i.test(id));
-  const rest = nonVision.filter(id => !fast.includes(id));
+  // Ставимо qwen3.8-27b та gpt-oss-120b першими, бо 20b занадто часто повертає порожній масив на українському тексті
+  const preferred = nonVision.filter(id => /qwen|120b|70b|llama-3\.3/i.test(id));
+  const rest = nonVision.filter(id => !preferred.includes(id));
 
   cachedModels = {
-    text: [...new Set([...fast, ...rest])],
+    text: [...new Set([...preferred, ...rest])],
     vision: [...new Set(vision)],
   };
   console.log(`… Доступні моделі Groq (текст: ${cachedModels.text.join(', ') || 'нема'}; фото: ${cachedModels.vision.join(', ') || 'нема'})`);
@@ -158,6 +158,7 @@ async function callGroq(text, images, { apiKey, today }) {
 
   let lastErr;
   for (const model of candidates) {
+    const isReasoning = /gpt-oss|qwen3/i.test(model);
     for (let attempt = 1; attempt <= 2; attempt++) {
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -168,9 +169,10 @@ async function callGroq(text, images, { apiKey, today }) {
         body: JSON.stringify({
           model,
           temperature: 0,
-          max_tokens: 4000,
+          max_tokens: 2048,
+          ...(isReasoning ? { reasoning_effort: 'low' } : {}),
           messages: [
-            { role: 'system', content: 'Ти парсер знижок. Відповідай ТІЛЬКИ валідним JSON-масивом [...], без пояснень і без довгих міркувань.' },
+            { role: 'system', content: 'Ти парсер знижок. Відповідай ТІЛЬКИ валідним JSON-масивом [...], без пояснень.' },
             { role: 'user', content: userContent },
           ],
         }),
@@ -183,12 +185,14 @@ async function callGroq(text, images, { apiKey, today }) {
           continue;
         }
         lastErr = new Error('GROQ_RATE_LIMIT');
-        break; // переходимо до наступної доступної моделі
+        break;
       }
 
       if (res.status === 404 || res.status === 400 || res.status === 503) {
+        const errBody = await res.text().catch(() => '');
+        console.log(`… Groq ${model} (${res.status}): ${errBody.slice(0, 120)}`);
         lastErr = new Error(`Groq HTTP ${res.status} (${model})`);
-        break; // переходимо до наступної моделі
+        break;
       }
 
       if (!res.ok) throw new Error(`Groq HTTP ${res.status}`);
@@ -196,10 +200,8 @@ async function callGroq(text, images, { apiKey, today }) {
       const data = await res.json();
       const rawContent = data.choices?.[0]?.message?.content ?? '[]';
       const deals = parseLLMDeals(rawContent, today);
-      if (!deals.length && rawContent.includes('<think>') && !rawContent.includes('</think>')) {
-        console.log(`… Groq (${model}): відповідь обірвалася на роздумах, пробуємо іншу модель`);
-        lastErr = new Error('THINK_TRUNCATED');
-        break;
+      if (deals.length > 0) {
+        console.log(`   ↳ ${model} знайшла ${deals.length} акцій`);
       }
       return deals;
     }
