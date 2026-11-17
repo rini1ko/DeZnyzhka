@@ -128,18 +128,17 @@ async function resolveGroqModels(apiKey) {
     .map(m => m.id)
     .filter(id => !/whisper|tts|guard|embed|safeguard/i.test(id));
 
-  // Обираємо моделі для картинок (vision / llama-4 / vl) та для тексту
   const vision = ids.filter(id => /vision|llama-4|scout|maverick|vl/i.test(id));
-  const text = [
-    ...ids.filter(id => /llama-3\.3|llama-3\.1|qwen|gemma|gpt-oss|deepseek|mistral|llama/i.test(id) && !vision.includes(id)),
-    ...ids.filter(id => !vision.includes(id)),
-  ];
+  // Спершу ставимо моделі без довгого <think> (llama, gemma, mistral, gpt-oss-20b), а важкі reasoning (qwen3, 120b) — в резерв
+  const nonVision = ids.filter(id => !vision.includes(id));
+  const fast = nonVision.filter(id => /llama|gemma|mistral|20b/i.test(id) && !/qwen3/i.test(id));
+  const rest = nonVision.filter(id => !fast.includes(id));
 
   cachedModels = {
-    text: [...new Set(text)],
+    text: [...new Set([...fast, ...rest])],
     vision: [...new Set(vision)],
   };
-  console.log(`… Доступні моделі Groq (текст: ${cachedModels.text.slice(0, 3).join(', ') || 'нема'}; фото: ${cachedModels.vision.slice(0, 2).join(', ') || 'нема'})`);
+  console.log(`… Доступні моделі Groq (текст: ${cachedModels.text.join(', ') || 'нема'}; фото: ${cachedModels.vision.join(', ') || 'нема'})`);
   return cachedModels;
 }
 
@@ -169,9 +168,9 @@ async function callGroq(text, images, { apiKey, today }) {
         body: JSON.stringify({
           model,
           temperature: 0,
-          max_tokens: 1500,
+          max_tokens: 4000,
           messages: [
-            { role: 'system', content: 'Повертай ТІЛЬКИ валідний JSON-масив без тегів think та без пояснень.' },
+            { role: 'system', content: 'Ти парсер знижок. Відповідай ТІЛЬКИ валідним JSON-масивом [...], без пояснень і без довгих міркувань.' },
             { role: 'user', content: userContent },
           ],
         }),
@@ -195,7 +194,14 @@ async function callGroq(text, images, { apiKey, today }) {
       if (!res.ok) throw new Error(`Groq HTTP ${res.status}`);
 
       const data = await res.json();
-      return parseLLMDeals(data.choices?.[0]?.message?.content ?? '[]', today);
+      const rawContent = data.choices?.[0]?.message?.content ?? '[]';
+      const deals = parseLLMDeals(rawContent, today);
+      if (!deals.length && rawContent.includes('<think>') && !rawContent.includes('</think>')) {
+        console.log(`… Groq (${model}): відповідь обірвалася на роздумах, пробуємо іншу модель`);
+        lastErr = new Error('THINK_TRUNCATED');
+        break;
+      }
+      return deals;
     }
   }
 
