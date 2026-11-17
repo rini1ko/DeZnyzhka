@@ -45,7 +45,7 @@ const buildPrompt = (text, today, hasImages = false) => `Ти — автомод
 ]
 
 ТЕКСТ:
-${(text || '(без тексту, дивись на зображення)').slice(0, 3500)}`;
+${(text || '(без тексту, дивись на зображення)').slice(0, 6500)}`;
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -128,7 +128,10 @@ async function resolveGroqModels(apiKey) {
 
   const vision = ids.filter(id => /vision|llama-4|scout|maverick|vl/i.test(id));
   const nonVision = ids.filter(id => !vision.includes(id));
-  const preferred = nonVision.filter(id => /qwen|120b|70b|llama-3\.3/i.test(id));
+  const preferred = [
+    ...nonVision.filter(id => /qwen/i.test(id)),
+    ...nonVision.filter(id => /120b|70b|llama-3\.3/i.test(id) && !/qwen/i.test(id)),
+  ];
   const rest = nonVision.filter(id => !preferred.includes(id));
 
   cachedModels = {
@@ -156,52 +159,39 @@ async function callGroq(text, images, { apiKey, today }) {
   let lastErr;
   for (const model of candidates) {
     const isReasoning = /gpt-oss|qwen3/i.test(model);
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          temperature: 0,
-          max_tokens: 2048,
-          ...(isReasoning ? { reasoning_effort: 'low' } : {}),
-          messages: [
-            { role: 'system', content: 'Ти парсер знижок. Відповідай ТІЛЬКИ валідним JSON-масивом [...], без пояснень.' },
-            { role: 'user', content: userContent },
-          ],
-        }),
-        signal: AbortSignal.timeout(45000),
-      });
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: 3000,
+        ...(isReasoning ? { reasoning_effort: 'low' } : {}),
+        messages: [
+          { role: 'system', content: 'Ти парсер знижок. Відповідай ТІЛЬКИ валідним JSON-масивом [...], без пояснень.' },
+          { role: 'user', content: userContent },
+        ],
+      }),
+      signal: AbortSignal.timeout(45000),
+    });
 
-      if (res.status === 429) {
-        if (attempt === 1) {
-          await sleep(16000);
-          continue;
-        }
-        lastErr = new Error('GROQ_RATE_LIMIT');
-        break;
-      }
-
-      if (res.status === 404 || res.status === 400 || res.status === 503) {
-        const errBody = await res.text().catch(() => '');
-        console.log(`… Groq ${model} (${res.status}): ${errBody.slice(0, 120)}`);
-        lastErr = new Error(`Groq HTTP ${res.status} (${model})`);
-        break;
-      }
-
-      if (!res.ok) throw new Error(`Groq HTTP ${res.status}`);
-
-      const data = await res.json();
-      const rawContent = data.choices?.[0]?.message?.content ?? '[]';
-      const deals = parseLLMDeals(rawContent, today);
-      if (deals.length > 0) {
-        console.log(`   ↳ ${model} знайшла ${deals.length} акцій`);
-      }
-      return deals;
+    if (res.status === 429 || res.status === 404 || res.status === 400 || res.status === 503) {
+      lastErr = new Error(res.status === 429 ? 'GROQ_RATE_LIMIT' : `Groq HTTP ${res.status} (${model})`);
+      continue; // не чекаємо 16 сек, одразу беремо наступну модель зі своїм лімітом
     }
+
+    if (!res.ok) throw new Error(`Groq HTTP ${res.status}`);
+
+    const data = await res.json();
+    const rawContent = data.choices?.[0]?.message?.content ?? '[]';
+    const deals = parseLLMDeals(rawContent, today);
+    if (deals.length > 0) {
+      console.log(`   ↳ ${model} знайшла ${deals.length} акцій`);
+    }
+    return deals;
   }
 
   throw lastErr || new Error('Усі моделі Groq недоступні');
