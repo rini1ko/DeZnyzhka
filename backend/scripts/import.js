@@ -67,8 +67,8 @@ async function fromPage(html, page) {
       }));
     } catch (e) {
       if (e.message.includes('RATE_LIMIT')) {
-        llmOff = true;
-        console.log('… денний ліміт Groq вичерпано, далі прості правила');
+        console.log('… пауза 15с через ліміт Groq, пробую далі');
+        await sleep(15000);
       } else {
         console.log(`… Groq: ${e.message}; для цієї сторінки прості правила`);
       }
