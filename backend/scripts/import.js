@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import { DEAL_RE, parsePosts, guessEndDate, addDays } from './telegram-parse.js';
 import { extractWebLines, htmlToText, promoLinks, promoImages } from './web-parse.js';
-import { extractDealsLLM } from './llm-extract.js';
+import { extractDealsLLM, smartCut } from './llm-extract.js';
 import { scoreDeal, hasProfanity, isBannedPromo } from '../src/moderation.js';
 
 const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);

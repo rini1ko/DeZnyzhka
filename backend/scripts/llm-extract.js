@@ -1,6 +1,4 @@
-// Витягування, категоризація та автомодерація акцій через Groq (Vision + Text).
-const GROQ_TEXT_MODEL = 'llama-3.3-70b-versatile';
-const GROQ_VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
+// Витягування, категоризація та автомодерація акцій через Groq (автовибір доступних моделей).
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const ALLOWED_CATEGORIES = [
@@ -50,7 +48,6 @@ ${(text || '(без тексту, дивись на зображення)').slic
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-// Розумне обрізання: ріже тільки по цілому реченню або слову, ніколи посеред слова
 export function smartCut(value, max) {
   if (typeof value !== 'string') return null;
   const clean = value.replace(/\s+/g, ' ').trim();
@@ -58,11 +55,9 @@ export function smartCut(value, max) {
   if (clean.length <= max) return clean;
 
   const sub = clean.slice(0, max);
-  // Якщо є кінець речення ближче до краю — обрізаємо по ньому
   const lastSentence = Math.max(sub.lastIndexOf('. '), sub.lastIndexOf('! '), sub.lastIndexOf('? '));
   if (lastSentence > max * 0.55) return sub.slice(0, lastSentence + 1).trim();
 
-  // Інакше ріжемо по останньому пробілу (цілому слову)
   const lastSpace = sub.lastIndexOf(' ');
   return (lastSpace > max * 0.4 ? sub.slice(0, lastSpace) : sub).trim() + '…';
 }
@@ -114,9 +109,44 @@ export function parseLLMDeals(raw, today) {
     .filter(Boolean);
 }
 
+// Кешуємо список реально доступних моделей для твого API ключа Groq
+let cachedModels = null;
+
+async function resolveGroqModels(apiKey) {
+  if (cachedModels) return cachedModels;
+
+  const res = await fetch('https://api.groq.com/openai/v1/models', {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) throw new Error(`Groq models HTTP ${res.status}`);
+
+  const json = await res.json();
+  const ids = (json.data || [])
+    .map(m => m.id)
+    .filter(id => !/whisper|tts|guard|embed|safeguard/i.test(id));
+
+  // Обираємо моделі для картинок (vision / llama-4 / vl) та для тексту
+  const vision = ids.filter(id => /vision|llama-4|scout|maverick|vl/i.test(id));
+  const text = [
+    ...ids.filter(id => /llama-3\.3|llama-3\.1|qwen|gemma|gpt-oss|deepseek|mistral|llama/i.test(id) && !vision.includes(id)),
+    ...ids.filter(id => !vision.includes(id)),
+  ];
+
+  cachedModels = {
+    text: [...new Set(text)],
+    vision: [...new Set(vision)],
+  };
+  console.log(`… Доступні моделі Groq (текст: ${cachedModels.text.slice(0, 3).join(', ') || 'нема'}; фото: ${cachedModels.vision.slice(0, 2).join(', ') || 'нема'})`);
+  return cachedModels;
+}
+
 async function callGroq(text, images, { apiKey, today }) {
-  const hasImages = Array.isArray(images) && images.length > 0;
-  const model = hasImages ? GROQ_VISION_MODEL : GROQ_TEXT_MODEL;
+  const { text: textModels, vision: visionModels } = await resolveGroqModels(apiKey);
+  const hasImages = Array.isArray(images) && images.length > 0 && visionModels.length > 0;
+  const candidates = hasImages ? visionModels : textModels;
+
+  if (!candidates.length) throw new Error('У твоєму акаунті Groq не знайдено доступних чат-моделей');
 
   const userContent = hasImages
     ? [
@@ -125,38 +155,48 @@ async function callGroq(text, images, { apiKey, today }) {
       ]
     : buildPrompt(text, today, false);
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        messages: [
-          { role: 'system', content: 'Повертай ТІЛЬКИ валідний JSON-масив без пояснень.' },
-          { role: 'user', content: userContent },
-        ],
-      }),
-      signal: AbortSignal.timeout(45000),
-    });
+  let lastErr;
+  for (const model of candidates) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          messages: [
+            { role: 'system', content: 'Повертай ТІЛЬКИ валідний JSON-масив без пояснень.' },
+            { role: 'user', content: userContent },
+          ],
+        }),
+        signal: AbortSignal.timeout(45000),
+      });
 
-    if (res.status === 429) {
-      if (attempt === 1) {
-        await sleep(16000); // чекаємо скидання хвилинного ліміту Groq (30 RPM)
-        continue;
+      if (res.status === 429) {
+        if (attempt === 1) {
+          await sleep(16000);
+          continue;
+        }
+        lastErr = new Error('GROQ_RATE_LIMIT');
+        break; // переходимо до наступної доступної моделі
       }
-      throw new Error('GROQ_RATE_LIMIT');
+
+      if (res.status === 404 || res.status === 400 || res.status === 503) {
+        lastErr = new Error(`Groq HTTP ${res.status} (${model})`);
+        break; // переходимо до наступної моделі
+      }
+
+      if (!res.ok) throw new Error(`Groq HTTP ${res.status}`);
+
+      const data = await res.json();
+      return parseLLMDeals(data.choices?.[0]?.message?.content ?? '[]', today);
     }
-
-    if (!res.ok) throw new Error(`Groq HTTP ${res.status}`);
-
-    const data = await res.json();
-    return parseLLMDeals(data.choices?.[0]?.message?.content ?? '[]', today);
   }
-  return [];
+
+  throw lastErr || new Error('Усі моделі Groq недоступні');
 }
 
 export async function extractDealsLLM(text, { groqKey, today, images = [] }) {
