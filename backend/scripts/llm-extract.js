@@ -2,9 +2,10 @@
 // Працює, лише якщо задано GEMINI_API_KEY; інакше import.js використовує прості правила.
 const MODELS = [
   process.env.GEMINI_MODEL,
+  'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
+  'gemini-flash-lite-latest',
   'gemini-flash-latest',
-  'gemini-2.0-flash',
 ].filter(Boolean);
 
 const prompt = (text, today) => `Ти — автомодератор агрегатора знижок і акцій кав'ярень та ресторанів Львова.
