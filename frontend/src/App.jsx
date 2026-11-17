@@ -3,6 +3,8 @@ import { supabase, api } from './api.js';
 
 const DAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'];
 const CATS = { coffee: 'Кава', food: 'Обіди' };
+const mapsUrl = p => 'https://www.google.com/maps/search/?api=1&query=' +
+  encodeURIComponent(`${p.name}, ${p.address}, Львів`);
 
 function AuthForm({ onDone }) {
   const [mode, setMode] = useState('signin');
@@ -66,7 +68,8 @@ function DealCard({ deal, user, saved, onChange, needLogin }) {
         <dt>Коли</dt><dd>{when}</dd>
         <dt>До</dt><dd>{new Date(deal.ends_on).toLocaleDateString('uk-UA')}</dd>
         {deal.conditions && <><dt>Умови</dt><dd>{deal.conditions}</dd></>}
-        {p.address && <><dt>Адреса</dt><dd>{p.address}</dd></>}
+        {p.address && <><dt>Адреса</dt><dd>
+          <a href={mapsUrl(p)} target="_blank" rel="noreferrer">{p.address} ↗</a></dd></>}
       </dl>
       <div className="deal-bottom">
         <span className="links">
