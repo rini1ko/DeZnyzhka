@@ -48,9 +48,9 @@ const found = data.elements.map(toPlace).filter(Boolean);
 const score = p => (p.website ? 2 : 0) + (p.instagram ? 1 : 0);
 const rows = found.sort((a, b) => score(b) - score(a)).slice(0, LIMIT);
 
-const { data: existing } = await db.from('places').select('name');
-const have = new Set((existing || []).map(p => p.name.toLowerCase()));
-const fresh = rows.filter(p => !have.has(p.name.toLowerCase()));
+const { data: existing } = await db.from('places').select('osm_id');
+const have = new Set((existing || []).map(p => p.osm_id).filter(Boolean));
+const fresh = rows.filter(p => !have.has(p.osm_id));
 
 const { error } = await db.from('places').upsert(fresh, { onConflict: 'osm_id', ignoreDuplicates: true });
 console.log(

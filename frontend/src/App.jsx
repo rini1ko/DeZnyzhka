@@ -105,20 +105,74 @@ function DealCard({ deal, user, saved, hot, onChange, onInvalid, needLogin }) {
 
 function AddDealForm({ places, onDone, onRequest }) {
   const [f, setF] = useState({ place_id: '', title: '', description: '', conditions: '', days: [1,2,3,4,5,6,7], time_from: '', time_to: '', ends_on: '' });
+  const [selectedBrand, setSelectedBrand] = useState('');
   const [err, setErr] = useState('');
   const set = (k, v) => setF(s => ({ ...s, [k]: v }));
   const toggleDay = d => set('days', f.days.includes(d) ? f.days.filter(x => x !== d) : [...f.days, d].sort());
+
+  // Групуємо заклади за назвою (нормалізуємо регістр і зайві пробіли), щоб об'єднати мережі
+  const groupsMap = new Map();
+  for (const p of places) {
+    const key = p.name.trim().toLowerCase();
+    if (!groupsMap.has(key)) groupsMap.set(key, { key, name: p.name.trim(), locations: [] });
+    groupsMap.get(key).locations.push(p);
+  }
+  const brands = [...groupsMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'uk'));
+  const currentBrand = groupsMap.get(selectedBrand);
+  const locations = currentBrand?.locations || [];
+
+  const formatLocation = (p, idx) => {
+    if (p.address) return p.district && !p.address.includes(p.district) ? `${p.address} (${p.district})` : p.address;
+    if (p.district && p.district !== 'Центр') return `р-н ${p.district} (локація #${idx + 1})`;
+    if (p.lat != null && p.lng != null) return `Локація #${idx + 1} (${p.lat.toFixed(4)}, ${p.lng.toFixed(4)})`;
+    return `Локація #${idx + 1}`;
+  };
+
+  function handleBrandChange(key) {
+    setSelectedBrand(key);
+    const group = groupsMap.get(key);
+    if (group && group.locations.length === 1) {
+      set('place_id', group.locations[0].id);
+    } else {
+      set('place_id', '');
+    }
+  }
+
   async function submit(e) {
     e.preventDefault(); setErr('');
+    if (!f.place_id) return setErr('Оберіть конкретну локацію закладу');
     try { const r = await api('/api/deals', { method: 'POST', body: f }); onDone(r.pending); } catch (e) { setErr(e.message); }
   }
+
   return (
     <form className="panel" onSubmit={submit}>
       <h2>Додати акцію</h2>
-      <select required value={f.place_id} onChange={e => set('place_id', e.target.value)}>
-        <option value="">Оберіть заклад</option>
-        {places.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+
+      <select required value={selectedBrand} onChange={e => handleBrandChange(e.target.value)}>
+        <option value="">Оберіть заклад або мережу</option>
+        {brands.map(b => (
+          <option key={b.key} value={b.key}>
+            {b.name}
+            {b.locations.length > 1
+              ? ` (${b.locations.length} лок.)`
+              : b.locations[0].address
+                ? ` — ${b.locations[0].address}`
+                : ''}
+          </option>
+        ))}
       </select>
+
+      {locations.length > 1 && (
+        <select required value={f.place_id} onChange={e => set('place_id', e.target.value)}>
+          <option value="">Оберіть локацію ({currentBrand.name})</option>
+          {locations.map((p, idx) => (
+            <option key={p.id} value={p.id}>
+              {formatLocation(p, idx)}
+            </option>
+          ))}
+        </select>
+      )}
+
       <button type="button" className="link" onClick={onRequest}>Немає закладу в списку? Подати заявку</button>
       <input placeholder="Назва акції, напр. −20% на капучино" required value={f.title} onChange={e => set('title', e.target.value)} />
       <textarea placeholder="Опис" value={f.description} onChange={e => set('description', e.target.value)} />

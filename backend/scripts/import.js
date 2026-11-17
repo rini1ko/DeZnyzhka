@@ -1,4 +1,4 @@
-// Автопошук та автомодерація знижок (текст + афіші/банери) через Groq та Gemini.
+// Автопошук та автомодерація знижок (текст + афіші/банери) через Groq.
 // Запуск: cd backend && npm run import
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -6,7 +6,7 @@ import { createClient } from '@supabase/supabase-js';
 import { DEAL_RE, parsePosts, guessEndDate, addDays } from './telegram-parse.js';
 import { extractWebLines, htmlToText, promoLinks, promoImages } from './web-parse.js';
 import { extractDealsLLM } from './llm-extract.js';
-import { scoreDeal, hasProfanity } from '../src/moderation.js';
+import { scoreDeal, hasProfanity, isBannedPromo } from '../src/moderation.js';
 
 const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 const manual = JSON.parse(readFileSync(new URL('../../infra/sources.json', import.meta.url), 'utf-8'));
@@ -18,10 +18,9 @@ const HEADERS = {
   'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8',
 };
 
-const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const GROQ_KEY = process.env.GROQ_API_KEY;
-const LLM_MAX = +(process.env.LLM_MAX_CALLS || (GROQ_KEY ? 400 : 40));
-let llmCalls = 0, llmOff = !GEMINI_KEY && !GROQ_KEY, failed = 0;
+const LLM_MAX = +(process.env.LLM_MAX_CALLS || 500);
+let llmCalls = 0, llmOff = !GROQ_KEY, failed = 0;
 const hash = t => createHash('md5').update(t).digest('hex').slice(0, 10);
 
 const SKIP_DOMAINS = /(facebook\.com|vk\.com|instagram\.com|business\.site)/i;
@@ -51,9 +50,8 @@ async function fromPage(html, page) {
   if (!llmOff && llmCalls < LLM_MAX && hasPromoHints) {
     try {
       llmCalls++;
-      await sleep(GROQ_KEY ? 2200 : 12000); // Groq дозволяє до 30 RPM, Gemini — до 5 RPM
+      await sleep(2300); // ~26 запитів/хв, безпечно в межах 30 RPM Groq
       const deals = await extractDealsLLM(text, {
-        geminiKey: GEMINI_KEY,
         groqKey: GROQ_KEY,
         today,
         images,
@@ -66,9 +64,9 @@ async function fromPage(html, page) {
     } catch (e) {
       if (e.message.includes('RATE_LIMIT')) {
         llmOff = true;
-        console.log('… ліміт ШІ вичерпано, далі прості правила');
+        console.log('… денний ліміт Groq вичерпано, далі прості правила');
       } else {
-        console.log(`… ШІ: ${e.message}; для цієї сторінки прості правила`);
+        console.log(`… Groq: ${e.message}; для цієї сторінки прості правила`);
       }
     }
   }
@@ -84,7 +82,6 @@ async function collect(s) {
   if (s.channel) {
     const posts = parsePosts(await getHtml(`https://t.me/s/${s.channel}`))
       .filter(p => !p.date || (Date.now() - Date.parse(p.date)) / 864e5 <= MAX_AGE_DAYS)
-      // Беремо пости або з ключовими словами, або з картинками-афішами
       .filter(p => DEAL_RE.test(p.text) || p.images.length > 0)
       .slice(0, 15);
 
@@ -93,9 +90,8 @@ async function collect(s) {
       if (!llmOff && llmCalls < LLM_MAX) {
         try {
           llmCalls++;
-          await sleep(GROQ_KEY ? 2200 : 12000);
+          await sleep(2300);
           const deals = await extractDealsLLM(p.text, {
-            geminiKey: GEMINI_KEY,
             groqKey: GROQ_KEY,
             today,
             images: p.images,
@@ -130,7 +126,7 @@ async function collect(s) {
 function toRow(it, placeId) {
   if (it.deal) {
     const fullText = `${it.deal.title} ${it.deal.description || ''} ${it.deal.conditions || ''}`;
-    if (hasProfanity(fullText)) return null;
+    if (hasProfanity(fullText) || isBannedPromo(fullText)) return null;
 
     const guessed = !it.deal.ends_on;
     const ends_on = it.deal.ends_on || addDays(today, 7);
@@ -148,16 +144,19 @@ function toRow(it, placeId) {
       source_url: it.url,
       approved: true,
       mod_score: 95,
-      mod_note: 'Автомодерація ШІ: ОК',
+      mod_note: `Groq (${it.deal.category}): ОК`,
       guessed,
     };
   }
 
   const end = guessEndDate(it.text, today);
-  const [first, ...rest] = it.text.split('\n').filter(Boolean);
+  const lines = it.text.split('\n').map(l => l.trim()).filter(Boolean);
+  const full = lines.join(' ');
+  const firstSentence = full.split(/(?<=[.!?])\s+/)[0] || lines[0] || '';
+
   const r = {
-    title: first.slice(0, 80),
-    description: (rest.join(' ') || (first.length > 80 ? first : '')).slice(0, 300) || null,
+    title: smartCut(firstSentence, 120),
+    description: lines.length > 1 ? smartCut(lines.slice(1).join(' '), 600) : (full.length > 120 ? smartCut(full, 600) : null),
     conditions: null,
     days: [1, 2, 3, 4, 5, 6, 7],
     time_from: null,
@@ -240,4 +239,4 @@ for (const s of sources) {
   }
 }
 
-console.log(`\nГотово. Не вдалося відкрити джерел: ${failed} із ${sources.length}. Запитів до ШІ: ${llmCalls}`);
+console.log(`\nГотово. Не вдалося відкрити джерел: ${failed} із ${sources.length}. Запитів до Groq: ${llmCalls}`);

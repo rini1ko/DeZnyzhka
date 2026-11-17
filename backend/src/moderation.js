@@ -1,10 +1,12 @@
-// Алгоритмічний скоринг акцій (правила + ознаки), без зовнішніх сервісів і платних API.
-// Це не навчена модель: ваги підібрані вручну. Результат: score 0..100 і verdict ok | review | reject.
-const DEAL_SIGNAL = /знижк|акці[яюїє]|\d{1,3}\s?%|\b\d\s?\+\s?\d\b|безкоштовн|подарунок|грн|₴|кешбек|комбо/i;
+// Алгоритмічний скоринг та стоп-фільтр акцій.
+const DEAL_SIGNAL = /знижк|акці[яюїє]|\d{1,3}\s?%|\b\d\s?\+\s?\d\b|безкоштовн|подарунок|грн|₴|кешбек|комбо|ланч/i;
 const BAD = /хуй|хуї|пизд|бляд|бляц|ебан|єбан|ёбан|йоб|залуп|мудак|гондон|шлюх|підор|підар|пидор/i;
+const SPAM_OR_BETTING = /казино|casino|букмекер|ставк[иа]|фріспін|freespin|слот[иі]|беттінг|betting|parimatch|favbet|cosmolot|pin-?up|ggbet|vbet|1xbet|крипт[аоу]|бінарн|мікрозайм|кредит\s+онлайн|розіграш\s+айфон|підпишись\s+і\s+виграй/i;
+const DELIVERY_ONLY = /(?:безкоштовн\w*|знижк\w*|акці\w*)\s+(?:на\s+)?доставк|тільки\s+на\s+доставк|лише\s+на\s+доставк|доставк[аиу]\s+безкоштовн|glovo|bolt\s?food/i;
 const CONTACTS = /(https?:\/\/|www\.|t\.me\/|\.com|\.ua|@\w{3,}|(\+?38)?0\d{9}|\d{3}[\s-]\d{2}[\s-]\d{2})/i;
 
 export const hasProfanity = text => BAD.test(text || '');
+export const isBannedPromo = text => SPAM_OR_BETTING.test(text || '') || DELIVERY_ONLY.test(text || '');
 
 export function scoreDeal({ title = '', description = '', conditions = '', ends_on, today }) {
   const reasons = [];
@@ -13,6 +15,9 @@ export function scoreDeal({ title = '', description = '', conditions = '', ends_
   let score = 40, hard = false;
 
   if (BAD.test(all)) { reasons.push('нецензурна лексика'); hard = true; }
+  if (SPAM_OR_BETTING.test(all)) { reasons.push('азартні ігри, ставки або спам'); hard = true; }
+  if (DELIVERY_ONLY.test(all)) { reasons.push('акція стосується лише доставки'); hard = true; }
+
   if (t.length < 5) { reasons.push('назва занадто коротка'); score -= 30; }
   else if (t.length > 80) { reasons.push('назва задовга'); score -= 10; }
   else score += 10;

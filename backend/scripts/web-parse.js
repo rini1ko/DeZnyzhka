@@ -10,7 +10,7 @@ export function htmlToText(html) {
 }
 
 export function extractWebLines(html) {
-  const lines = htmlToText(html).split('\n').filter(l => l.length >= 15 && l.length <= 300 && DEAL_RE.test(l));
+  const lines = htmlToText(html).split('\n').filter(l => l.length >= 15 && l.length <= 600 && DEAL_RE.test(l));
   return [...new Set(lines)].slice(0, 15);
 }
 
