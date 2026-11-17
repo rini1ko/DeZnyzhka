@@ -45,7 +45,7 @@ const buildPrompt = (text, today, hasImages = false) => `Ти — автомод
 ]
 
 ТЕКСТ:
-${(text || '(без тексту, дивись на зображення)').slice(0, 12000)}`;
+${(text || '(без тексту, дивись на зображення)').slice(0, 3500)}`;
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -68,7 +68,6 @@ export function parseLLMDeals(raw, today) {
   try {
     const withoutThink = String(raw).replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     const cleaned = withoutThink.replace(/^```json\s*|\s*```$/gi, '').trim();
-    // Витягуємо перший JSON-масив [...], навіть якщо модель написала текст до/після нього
     const match = cleaned.match(/\[[\s\S]*\]/);
     const parsed = JSON.parse(match ? match[0] : cleaned);
     arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.deals) ? parsed.deals : [];
@@ -111,7 +110,6 @@ export function parseLLMDeals(raw, today) {
     .filter(Boolean);
 }
 
-// Кешуємо список реально доступних моделей для твого API ключа Groq
 let cachedModels = null;
 
 async function resolveGroqModels(apiKey) {
@@ -130,7 +128,6 @@ async function resolveGroqModels(apiKey) {
 
   const vision = ids.filter(id => /vision|llama-4|scout|maverick|vl/i.test(id));
   const nonVision = ids.filter(id => !vision.includes(id));
-  // Ставимо qwen3.8-27b та gpt-oss-120b першими, бо 20b занадто часто повертає порожній масив на українському тексті
   const preferred = nonVision.filter(id => /qwen|120b|70b|llama-3\.3/i.test(id));
   const rest = nonVision.filter(id => !preferred.includes(id));
 
@@ -215,7 +212,6 @@ export async function extractDealsLLM(text, { groqKey, today, images = [] }) {
 
   const { text: textModels, vision: visionModels } = await resolveGroqModels(groqKey);
 
-  // Картинки відправляємо в Groq ТІЛЬКИ якщо в акаунті реально є vision-модель
   if (images.length > 0 && visionModels.length > 0) {
     try {
       return await callGroq(text, images, { apiKey: groqKey, today });
@@ -224,7 +220,6 @@ export async function extractDealsLLM(text, { groqKey, today, images = [] }) {
     }
   }
 
-  // Якщо vision-моделі немає або текст достатній — одразу парсимо текст без затримок
   if (!text || text.trim().length < 20 || !textModels.length) return [];
   return await callGroq(text, [], { apiKey: groqKey, today });
 }
