@@ -2,7 +2,7 @@
 export const DEAL_RE = /знижк|акці[яюїє]|-\s?\d{1,2}\s?%|\b\d\s?\+\s?\d\b|безкоштовн|подарунок/i;
 
 const NAMED = { amp: '&', lt: '<', gt: '>', quot: '"', nbsp: ' ' };
-const decode = s => s
+export const decode = s => s
   .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(+n))
   .replace(/&(amp|lt|gt|quot|nbsp);/g, (_, n) => NAMED[n]);
 

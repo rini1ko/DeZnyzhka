@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch --env-file=.env src/index.js"
+    "dev": "node --watch --env-file=.env src/index.js",
+    "import": "node --env-file=.env scripts/import.js",
+    "import:places": "node --env-file=.env scripts/import-places.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

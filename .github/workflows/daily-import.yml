@@ -1,0 +1,35 @@
+# Щоденний автопошук знижок. Секрети: GitHub -> Settings -> Secrets and variables -> Actions
+#   SUPABASE_URL, SUPABASE_SERVICE_KEY, GEMINI_API_KEY (необов'язково)
+# Увага: GitHub вимикає розклад, якщо в репозиторії 60 днів немає комітів. Тоді Actions -> Daily import -> Enable workflow.
+name: Daily import
+on:
+  schedule:
+    - cron: '0 5 * * *'     # щодня о 05:00 UTC (07:00 за Києвом); запуск може запізнитись
+  workflow_dispatch:         # кнопка «Run workflow» для ручного запуску
+permissions:
+  contents: read
+concurrency:
+  group: daily-import
+  cancel-in-progress: false
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --omit=dev
+      - name: Нові заклади з OpenStreetMap
+        run: node scripts/import-places.js
+        continue-on-error: true
+      - name: Пошук знижок
+        run: node scripts/import.js
